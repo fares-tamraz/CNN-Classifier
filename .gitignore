@@ -1,15 +1,3 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Data (do NOT upload datasets)
-data/
-logs/
-
 # Models
 models/*.h5
 models/*.keras
-
-# VS Code
-.vscode/
