@@ -1,6 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Data (keep raw/processed out of git)
+data/
+
+# Trained models and logs
 models/
 logs/
-__pycache__/
-*.h5
-*.keras
-dataset/
+
+# Editors / OS
+.vscode/
+.DS_Store
+
+# Archives
+*.zip

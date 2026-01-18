@@ -1,0 +1,10 @@
+# Core ML
+tensorflow>=2.12
+numpy
+
+# Data prep
+pyyaml
+pillow
+
+# Metrics
+scikit-learn

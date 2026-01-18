@@ -1,79 +1,101 @@
-from keras import layers, models
+"""Model definitions.
+
+build_model() returns an *uncompiled* Keras model.
+Compilation happens in train.py so loss/metrics stay consistent.
+"""
+
+import tensorflow as tf
 
 
-def build_cnn_model(
-    input_shape=(224, 224, 3),
-    num_classes=2
+def build_model(
+    input_shape=(224, 224, 1),
+    num_classes=2,
+    model_type="simple",
+    dropout=0.3,
 ):
-    """
-    Builds and returns a CNN model for image classification.
+    """Build a CNN for grayscale X-ray style cap inspection.
 
     Args:
-        input_shape (tuple): Shape of input images (height, width, channels)
-        num_classes (int): Number of output classes
+        input_shape: (H, W, C). Use C=1 for grayscale.
+        num_classes: 2 for binary, 5 for multi-class, etc.
+        model_type: "simple" or "mobilenetv2".
+        dropout: dropout rate on the classifier head.
 
     Returns:
-        model (tf.keras.Model): Compiled CNN model
+        tf.keras.Model (uncompiled)
     """
 
-    model = models.Sequential()
+    if model_type not in {"simple", "mobilenetv2"}:
+        raise ValueError("model_type must be 'simple' or 'mobilenetv2'")
 
-    # -----------------------------
-    # Convolutional Block 1
-    # -----------------------------
-    model.add(layers.Conv2D(
-        filters=32,
-        kernel_size=(3, 3),
-        activation='relu',
-        input_shape=input_shape
-    ))
-    model.add(layers.MaxPooling2D(pool_size=(2, 2)))
+    if model_type == "simple":
+        return _build_simple_cnn(input_shape=input_shape, num_classes=num_classes, dropout=dropout)
 
-    # -----------------------------
-    # Convolutional Block 2
-    # -----------------------------
-    model.add(layers.Conv2D(
-        filters=64,
-        kernel_size=(3, 3),
-        activation='relu'
-    ))
-    model.add(layers.MaxPooling2D(pool_size=(2, 2)))
+    return _build_mobilenetv2(input_shape=input_shape, num_classes=num_classes, dropout=dropout)
 
-    # -----------------------------
-    # Convolutional Block 3
-    # -----------------------------
-    model.add(layers.Conv2D(
-        filters=128,
-        kernel_size=(3, 3),
-        activation='relu'
-    ))
-    model.add(layers.MaxPooling2D(pool_size=(2, 2)))
 
-    # -----------------------------
-    # Fully Connected Layers
-    # -----------------------------
-    model.add(layers.Flatten())
+def _build_simple_cnn(input_shape, num_classes, dropout):
+    inputs = tf.keras.Input(shape=input_shape)
 
-    model.add(layers.Dense(
-        units=128,
-        activation='relu'
-    ))
+    x = inputs
 
-    model.add(layers.Dropout(0.5))
+    # Block 1
+    x = tf.keras.layers.Conv2D(32, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.MaxPooling2D()(x)
 
-    # Output layer
-    model.add(layers.Dense(
-        units=num_classes,
-        activation='softmax'
-    ))
+    # Block 2
+    x = tf.keras.layers.Conv2D(64, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.MaxPooling2D()(x)
 
-    # -----------------------------
-    # Compile Model
-    # -----------------------------
-    model.compile(
-        optimizer='adam',
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
+    # Block 3
+    x = tf.keras.layers.Conv2D(128, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+    x = tf.keras.layers.MaxPooling2D()(x)
+
+    # Block 4
+    x = tf.keras.layers.Conv2D(256, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.ReLU()(x)
+
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(dropout)(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
+
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="cap_cnn_simple")
+
+
+def _build_mobilenetv2(input_shape, num_classes, dropout):
+    """Transfer learning option.
+
+    Notes:
+      - MobileNetV2 expects 3 channels. If you pass grayscale (C=1), we
+        convert to RGB by repeating channels.
+      - This is optional; keep 'simple' as your baseline.
+    """
+
+    inputs = tf.keras.Input(shape=input_shape)
+
+    if input_shape[-1] == 1:
+        x = tf.keras.layers.Lambda(lambda t: tf.image.grayscale_to_rgb(t))(inputs)
+    else:
+        x = inputs
+
+    base = tf.keras.applications.MobileNetV2(
+        include_top=False,
+        weights="imagenet",
+        input_shape=(input_shape[0], input_shape[1], 3),
     )
+    base.trainable = False
 
-    return model
+    x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
+    x = base(x, training=False)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(dropout)(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
+
+    return tf.keras.Model(inputs=inputs, outputs=outputs, name="cap_cnn_mobilenetv2")
