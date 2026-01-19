@@ -18,7 +18,7 @@ import numpy as np
 import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 
-from data_loader import load_datasets
+from .data_loader import load_datasets
 
 
 def load_class_names(path: str):

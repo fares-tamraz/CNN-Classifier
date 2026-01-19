@@ -17,8 +17,8 @@ from typing import Dict
 import numpy as np
 import tensorflow as tf
 
-from data_loader import load_datasets
-from model import build_model
+from .data_loader import load_datasets
+from .model import build_model
 
 
 def compute_class_weights(train_ds: tf.data.Dataset, num_classes: int) -> Dict[int, float]:
