@@ -8,3 +8,6 @@ pillow
 
 # Metrics
 scikit-learn
+
+# Realtime / conveyor (webcam, industrial camera capture)
+opencv-python>=4.8

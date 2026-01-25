@@ -1,13 +1,11 @@
-"""Evaluate a trained model on the test set.
+"""Evaluate a trained model by loading weights only, not the full model structure.
 
-For the binary model in this repo (sigmoid output), we report:
-- Accuracy
-- Confusion matrix
-- Precision/Recall/F1 for BOTH classes
+This avoids issues with Lambda layer deserialization in newer Keras versions.
 
 Usage:
-  python src/evaluate.py --model models/cap_classifier_best.keras \
-    --class_names models/class_names.json --data_dir data/processed/cls_binary_fullframe
+  python src/evaluate_weights_only.py --model models/cap_classifier_best.keras \
+    --class_names models/class_names.json --data_dir data/processed/cls_binary_crops \
+    --model_type mobilenetv2
 """
 
 from __future__ import annotations
@@ -19,7 +17,8 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-# When running as a script from repo root, `src` is a package.
+from data_loader import load_datasets
+from model import build_model
 
 
 def load_class_names(path: str) -> list[str]:
@@ -32,35 +31,45 @@ def load_class_names(path: str) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a bottle cap classifier")
+    parser = argparse.ArgumentParser(description="Evaluate a bottle cap classifier (weights-only)")
     parser.add_argument("--model", "--model_path", dest="model_path", required=True)
     parser.add_argument("--class_names", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--image_size", type=int, nargs=2, default=[224, 224])
     parser.add_argument("--color_mode", type=str, choices=["grayscale", "rgb"], default="grayscale")
+    parser.add_argument("--model_type", type=str, choices=["simple", "mobilenetv2"], default="mobilenetv2")
     parser.add_argument("--threshold", type=float, default=0.5, help="p_good threshold for label")
     args = parser.parse_args()
 
-    # Local import to avoid path issues
-    from src.data_loader import load_datasets
-
     image_size = (int(args.image_size[0]), int(args.image_size[1]))
 
-    # Load model with custom Lambda layer support
-    # Keras >= 3.0 has issues deserializing Lambda layers, so we handle it gracefully
-    try:
-        model = tf.keras.models.load_model(args.model_path, compile=False)
-    except (NotImplementedError, ValueError) as e:
-        # If deserialization fails due to Lambda layer, try with safe_mode=False
-        print(f"Note: Standard load failed ({type(e).__name__}), attempting workaround...")
-        model = tf.keras.models.load_model(
-            args.model_path, 
-            safe_mode=False, 
-            compile=False
-        )
-    
+    # Rebuild the model from scratch, then load weights
     class_names = load_class_names(args.class_names)
+    num_classes = len(class_names)
+    
+    input_channels = 1 if args.color_mode == "grayscale" else 3
+    input_shape = (image_size[0], image_size[1], input_channels)
+    
+    # Build a fresh model
+    model = build_model(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        model_type=args.model_type,
+        dropout=0.3
+    )
+    
+    # Compile with a dummy loss (we're only doing inference)
+    model.compile(loss='categorical_crossentropy', metrics=['accuracy'])
+    
+    # Load weights from the saved model
+    try:
+        print(f"Loading weights from {args.model_path}...")
+        model.load_weights(args.model_path)
+    except Exception as e:
+        print(f"Error loading weights: {e}")
+        print("Attempting to load full model instead...")
+        model = tf.keras.models.load_model(args.model_path, compile=False)
 
     _, _, test_ds, ds_class_names = load_datasets(
         args.data_dir,

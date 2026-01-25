@@ -28,6 +28,8 @@ Create a virtual environment, then:
 pip install -r requirements.txt
 ```
 
+**Build a model and test with your laptop camera:** see **[BUILD_AND_TEST.md](BUILD_AND_TEST.md)** for the full flow (prepare → train → evaluate → realtime sorter).
+
 ## 1) Put your Roboflow dataset in `data/raw/`
 
 Example (your downloaded zip extracted):
@@ -136,6 +138,40 @@ python src/predict_two_stage.py \
   --image path/to/image.jpg
 ```
 
+## Realtime conveyor / webcam sorter (OpenCV)
+
+```
+python src/realtime_sorter.py --model models/cap_classifier_best.keras --class_names models/class_names.json --show_roi
+```
+
+- **SPACE** = classify current frame → ACCEPT (chute 0) / REJECT (chute 1) or multi-chute when using Stage B.
+- **Q** = quit. Dry run by default (prints `[BELT]` / `[CHUTE]` only). Use `--no_dry_run` when connected to real hardware.
+
+Two-stage **multi-chute** (Good | Broken Cap | Broken Ring | Loose Cap, etc.):
+
+```
+python src/realtime_sorter.py --model models/stageA_binary.keras --class_names models/stageA_classes.json --stageB_model models/stageB_faulttype.keras --stageB_classes models/stageB_classes.json --show_roi
+```
+
+`BeltController` is a hardware-safe stub. Replace it with GPIO/serial when wiring servos and diverters. See **`CONVEYOR_DESIGN.md`** for trigger options, lighting, and integration notes.
+
+### Handoff to electrical (ML/OpenCV API)
+
+**Your scope:** good vs faulty (and optionally fault type). Mechanical = conveyor/chutes; electrical = camera, trigger, servos.
+
+Provide the **`CapClassifier`** API so electrical can call it when they have a frame:
+
+```python
+from src.cap_classifier import CapClassifier
+
+clf = CapClassifier("models/cap_classifier_best.keras", "models/class_names.json", roi=(0.3, 0.7, 0.15, 0.55))
+result = clf.classify(frame)   # frame = BGR ndarray from cv2
+# result["decision"] "good"|"faulty"|"unsure", result["chute_id"] 0=good, 1+=reject
+```
+
+They use `chute_id` to drive the diverter. See **`CONVEYOR_DESIGN.md` § Handoff to electrical** for full I/O contract and examples.
+
+CLI (e.g. for scripts): `python -m src.cap_classifier --model ... --class_names ... path/to/image.png` → JSON to stdout.
 
 ## Notes on "GOOD vs FAULTY"
 

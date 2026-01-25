@@ -12,9 +12,8 @@ Decision policy (factory-style):
 If UNSURE, we (optionally) "recheck" by reversing the belt briefly (simulated
 here) and taking a second sample. Final decision is based on the average.
 
-This script is intentionally hardware-safe by default: it prints commands
-instead of driving motors. When you're ready, swap BeltController with Arduino
-serial commands.
+**Dry run by default:** prints [BELT] / [CHUTE] only; no hardware. Use
+--no_dry_run when connected to real servos. Use --show_roi to see the crop.
 """
 
 from __future__ import annotations
@@ -125,30 +124,61 @@ def decide_with_recheck(
     return ("ACCEPT" if avg >= th_final else "REJECT"), avg
 
 
+def run_stageB_and_chute(
+    model_b: tf.keras.Model,
+    class_names_b: list[str],
+    x: np.ndarray,
+) -> Tuple[int, str, float]:
+    """Run Stage B on preprocessed input. Returns (chute_id, label, confidence)."""
+    x_b = match_model_channels(x, model_b)
+    out = model_b.predict(x_b, verbose=0)
+    probs = np.asarray(out)[0]
+    idx = int(np.argmax(probs))
+    conf = float(probs[idx])
+    label = class_names_b[idx]
+    # Chute 0 = good (Stage A). Stage B faults -> chutes 1, 2, 3, ...
+    chute_id = 1 + idx
+    return chute_id, label, conf
+
+
 class BeltController:
-    """Hardware-safe placeholder controller."""
+    """Hardware-safe placeholder controller.
+
+    - forward(): advance belt (e.g. part moves to next position).
+    - reverse(seconds): briefly reverse (for recheck).
+    - stop(): halt belt (legacy; use divert + forward for chutes).
+    - divert(chute_id): route part to chute. 0 = good, 1+ = reject/fault-type.
+      Replace with GPIO/serial when wiring to real hardware.
+    """
 
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
 
-    def forward(self):
+    def forward(self) -> None:
         if self.dry_run:
             print("[BELT] FORWARD")
 
-    def reverse(self, seconds: float):
+    def reverse(self, seconds: float) -> None:
         if self.dry_run:
             print(f"[BELT] REVERSE for {seconds:.2f}s")
         time.sleep(seconds)
 
-    def stop(self):
+    def stop(self) -> None:
         if self.dry_run:
             print("[BELT] STOP")
+
+    def divert(self, chute_id: int) -> None:
+        """Route part to chute. 0=good, 1=reject (or fault-type 1), 2–4=fault types."""
+        if self.dry_run:
+            print(f"[CHUTE] DIVERT -> {chute_id}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Real-time cap classifier with optional UNSURE recheck.")
     parser.add_argument("--model", type=str, default="models/cap_classifier_best.keras")
     parser.add_argument("--class_names", type=str, default="models/class_names.json")
+    parser.add_argument("--stageB_model", type=str, default=None, help="Stage B fault-type model (optional)")
+    parser.add_argument("--stageB_classes", type=str, default=None, help="Stage B class_names JSON (optional)")
 
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--width", type=int, default=1280)
@@ -160,7 +190,12 @@ def main() -> None:
 
     parser.add_argument("--reverse_seconds", type=float, default=0.80)
     parser.add_argument("--no_recheck", action="store_true", help="Disable the second-sample recheck")
-    parser.add_argument("--dry_run", action="store_true", help="Don't control any hardware, just print actions")
+    parser.add_argument(
+        "--no_dry_run",
+        action="store_true",
+        dest="no_dry_run",
+        help="Actually control hardware (default: dry run, print [BELT]/[CHUTE] only)",
+    )
 
     # ROI as fractions of frame width/height
     parser.add_argument("--roi", type=float, nargs=4, default=[0.30, 0.70, 0.15, 0.55],
@@ -169,6 +204,7 @@ def main() -> None:
     parser.add_argument("--show_roi", action="store_true", help="Draw ROI box on preview")
 
     args = parser.parse_args()
+    dry_run = not getattr(args, "no_dry_run", False)
 
     model = tf.keras.models.load_model(args.model)
     class_names = load_class_names(args.class_names)
@@ -176,9 +212,17 @@ def main() -> None:
     if "good" not in class_names or "faulty" not in class_names:
         raise SystemExit(f"class_names must include 'good' and 'faulty'. Got: {class_names}")
 
+    use_stageB = bool(args.stageB_model and args.stageB_classes)
+    model_b: Optional[tf.keras.Model] = None
+    class_names_b: Optional[list[str]] = None
+    if use_stageB:
+        model_b = tf.keras.models.load_model(args.stageB_model)
+        class_names_b = load_class_names(args.stageB_classes)
+        print(f"Two-stage mode: Stage B classes = {class_names_b}")
+
     image_size = tuple(int(x) for x in model.input_shape[1:3])  # type: ignore
 
-    belt = BeltController(dry_run=True if args.dry_run else False)
+    belt = BeltController(dry_run=dry_run)
 
     cap = cv2.VideoCapture(args.camera)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
@@ -187,7 +231,9 @@ def main() -> None:
     if not cap.isOpened():
         raise SystemExit("Could not open camera.")
 
-    print("\nControls:\n  SPACE = classify current frame\n  Q     = quit\n")
+    mode_str = "two-stage (multi-chute)" if use_stageB else "binary (accept/reject)"
+    print(f"\nMode: {mode_str}")
+    print("Controls:\n  SPACE = classify current frame\n  Q     = quit\n")
 
     last_text = "READY"
     last_p: Optional[float] = None
@@ -233,10 +279,18 @@ def main() -> None:
                 last_text = decision1
                 last_p = score1
                 print(f"[PASS1] p_good={p1:.3f} -> {decision1}")
+                x_last = x1
                 if decision1 == "ACCEPT":
+                    belt.divert(0)
                     belt.forward()
                 else:
-                    belt.stop()
+                    if use_stageB and model_b is not None and class_names_b is not None:
+                        chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, class_names_b, x_last)
+                        print(f"  StageB: {fault_label} (conf={fault_conf:.3f}) -> chute {chute_id}")
+                        belt.divert(chute_id)
+                    else:
+                        belt.divert(1)
+                    belt.forward()
                 continue
 
             # Recheck flow
@@ -248,7 +302,8 @@ def main() -> None:
                 last_text = "REJECT"
                 last_p = p1
                 print("[PASS2] Could not read frame -> REJECT (safe)")
-                belt.stop()
+                belt.divert(1)
+                belt.forward()
                 continue
 
             x2 = preprocess_frame(frame2, image_size=image_size, roi=tuple(args.roi))
@@ -267,10 +322,18 @@ def main() -> None:
             last_p = final_score
             print(f"[PASS2] p_good2={p2:.3f} -> FINAL avg={final_score:.3f} -> {final_decision}")
 
+            x_last = x2
             if final_decision == "ACCEPT":
+                belt.divert(0)
                 belt.forward()
             else:
-                belt.stop()
+                if use_stageB and model_b is not None and class_names_b is not None:
+                    chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, class_names_b, x_last)
+                    print(f"  StageB: {fault_label} (conf={fault_conf:.3f}) -> chute {chute_id}")
+                    belt.divert(chute_id)
+                else:
+                    belt.divert(1)
+                belt.forward()
 
     cap.release()
     cv2.destroyAllWindows()

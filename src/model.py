@@ -81,7 +81,10 @@ def _build_mobilenetv2(input_shape, num_classes, dropout):
     inputs = tf.keras.Input(shape=input_shape)
 
     if input_shape[-1] == 1:
-        x = tf.keras.layers.Lambda(lambda t: tf.image.grayscale_to_rgb(t))(inputs)
+        x = tf.keras.layers.Lambda(
+            lambda t: tf.image.grayscale_to_rgb(t),
+            output_shape=(input_shape[0], input_shape[1], 3)
+        )(inputs)
     else:
         x = inputs
 

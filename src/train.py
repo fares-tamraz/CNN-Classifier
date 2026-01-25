@@ -34,12 +34,48 @@ def compute_class_weights(y: np.ndarray) -> dict[int, float]:
     return weights
 
 
+class FocalLoss(tf.keras.losses.Loss):
+    """Focal loss for handling class imbalance.
+    
+    Focuses on hard examples by down-weighting easy ones.
+    Works with sparse (int) labels.
+    """
+    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def call(self, y_true, y_pred):
+        """Compute focal loss."""
+        # Sparse to one-hot
+        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), 
+                                   tf.shape(y_pred)[-1])
+        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
+        
+        # Clip predictions
+        epsilon = 1e-7
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+        
+        # Cross entropy
+        ce = -y_true_onehot * tf.math.log(y_pred)
+        ce = tf.reduce_sum(ce, axis=-1)
+        
+        # Focal weight: (1 - p_t)^gamma
+        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
+        focal_weight = tf.pow(1.0 - p_t, self.gamma)
+        
+        # Focal loss
+        focal_loss = self.alpha * focal_weight * ce
+        
+        return tf.reduce_mean(focal_loss)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train bottle cap classifier")
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--out_dir", type=str, default="models")
 
-    parser.add_argument("--model_type", type=str, default="mobilenetv2", choices=["simple_cnn", "mobilenetv2"])
+    parser.add_argument("--model_type", type=str, default="mobilenetv2", choices=["simple", "mobilenetv2"])
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--image_size", type=int, nargs=2, default=[224, 224])
@@ -89,7 +125,8 @@ def main() -> None:
             tf.keras.metrics.Recall(name="recall"),
         ]
     else:
-        loss = tf.keras.losses.SparseCategoricalCrossentropy()
+        # Use focal loss for multiclass (handles imbalance better, focuses on hard examples)
+        loss = FocalLoss(alpha=1.0, gamma=2.0)
         metrics = [tf.keras.metrics.SparseCategoricalAccuracy(name="acc")]
 
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr), loss=loss, metrics=metrics)
