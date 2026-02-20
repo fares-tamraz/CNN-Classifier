@@ -22,6 +22,7 @@ import numpy as np
 import tensorflow as tf
 
 from data_loader import load_datasets
+from losses import FocalLoss
 from model import build_model
 
 
@@ -32,42 +33,6 @@ def compute_class_weights(y: np.ndarray) -> dict[int, float]:
     k = len(classes)
     weights = {int(c): float(n / (k * cnt)) for c, cnt in zip(classes, counts)}
     return weights
-
-
-class FocalLoss(tf.keras.losses.Loss):
-    """Focal loss for handling class imbalance.
-    
-    Focuses on hard examples by down-weighting easy ones.
-    Works with sparse (int) labels.
-    """
-    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.alpha = alpha
-        self.gamma = gamma
-    
-    def call(self, y_true, y_pred):
-        """Compute focal loss."""
-        # Sparse to one-hot
-        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), 
-                                   tf.shape(y_pred)[-1])
-        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
-        
-        # Clip predictions
-        epsilon = 1e-7
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        
-        # Cross entropy
-        ce = -y_true_onehot * tf.math.log(y_pred)
-        ce = tf.reduce_sum(ce, axis=-1)
-        
-        # Focal weight: (1 - p_t)^gamma
-        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
-        focal_weight = tf.pow(1.0 - p_t, self.gamma)
-        
-        # Focal loss
-        focal_loss = self.alpha * focal_weight * ce
-        
-        return tf.reduce_mean(focal_loss)
 
 
 def main() -> None:

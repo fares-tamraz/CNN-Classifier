@@ -74,27 +74,24 @@ def _as_numpy(y) -> np.ndarray:
 
 
 def infer_p_good(model: tf.keras.Model, class_names: list[str], x: tf.Tensor) -> float:
-    """Returns p(good) for either sigmoid (1 output) or softmax (2 outputs)."""
+    """Returns p(good) for sigmoid (1 output), binary softmax (2 outputs), or N-class softmax."""
     y = _as_numpy(model.predict(x, verbose=0))
 
-    # sigmoid binary: (1,1) => probability of the *positive* class (index 1)
+    # sigmoid binary: (1,1)
     if y.ndim == 2 and y.shape[1] == 1:
         p_pos = float(y[0, 0])
-        # class order matters: Keras binary uses label 1 as "positive".
-        # We want p(good). If class_names[1] is good => p_good = p_pos.
         if len(class_names) == 2 and class_names[1] == "good":
             return p_pos
         if len(class_names) == 2 and class_names[1] == "faulty":
             return 1.0 - p_pos
-        # fallback: assume ['faulty','good'] (most common)
         return p_pos
 
-    # softmax binary: (1,2)
-    if y.ndim == 2 and y.shape[1] == 2:
+    # softmax with any number of classes
+    if y.ndim == 2 and y.shape[1] >= 2:
         probs = y[0]
         if "good" in class_names:
             return float(probs[class_names.index("good")])
-        return float(probs[1])  # common default
+        return float(probs[-1])  # fallback: last class
 
     raise ValueError(f"Unexpected model output shape: {y.shape}")
 
@@ -159,7 +156,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default=None, help="Path to .keras model")
     parser.add_argument("--model_path", type=str, default=None, help="(alias of --model)")
 
-    parser.add_argument("--class_names", type=str, default="models/class_names.json")
+    parser.add_argument("--class_names", type=str, default="models/v7/class_names.json")
     parser.add_argument("--image", type=str, default=None)
     parser.add_argument("--folder", type=str, default=None)
 

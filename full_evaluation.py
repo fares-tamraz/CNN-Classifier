@@ -9,32 +9,15 @@ from sklearn.metrics import classification_report, confusion_matrix
 from src.data_loader import load_datasets
 
 
-class FocalLoss(tf.keras.losses.Loss):
-    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.alpha = alpha
-        self.gamma = gamma
-    
-    def call(self, y_true, y_pred):
-        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), tf.shape(y_pred)[-1])
-        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
-        epsilon = 1e-7
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        ce = -y_true_onehot * tf.math.log(y_pred)
-        ce = tf.reduce_sum(ce, axis=-1)
-        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
-        focal_weight = tf.pow(1.0 - p_t, self.gamma)
-        focal_loss = self.alpha * focal_weight * ce
-        return tf.reduce_mean(focal_loss)
-
-
 def main():
-    # Load model - use v6 by default, fallback to v5, v4, v3
+    # Load model - use v7 by default, fallback to v6, v5, v4, v3
     import sys
     if len(sys.argv) > 1:
         model_path = sys.argv[1]
     else:
-        model_path = "models/v6/cap_classifier_best.keras"
+        model_path = "models/v7/cap_classifier_best.keras"
+        if not Path(model_path).exists():
+            model_path = "models/v6/cap_classifier_best.keras"
         if not Path(model_path).exists():
             model_path = "models/v5/cap_classifier_best.keras"
         if not Path(model_path).exists():
@@ -51,7 +34,7 @@ def main():
         class_names_path = Path("models/v6/class_names.json")
     
     # Auto-detect dataset based on model
-    if "v6" in str(model_path) or "v5" in str(model_path):
+    if any(v in str(model_path) for v in ("v7", "v6", "v5")):
         data_dir = "data/processed/cls_3class_crops"
     else:
         data_dir = "data/processed/cls_5class_crops_v3"

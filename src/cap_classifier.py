@@ -6,9 +6,13 @@ Electrical calls this when they have a frame; you don't handle camera, trigger, 
 Usage:
   from src.cap_classifier import CapClassifier, classify_cap
 
-  clf = CapClassifier("models/cap_classifier_best.keras", "models/class_names.json")
+  clf = CapClassifier("models/v7/cap_classifier_best.keras", "models/v7/class_names.json")
   result = clf.classify(frame)   # frame: BGR ndarray or path
-  # result["decision"] "good"|"faulty"|"unsure", result["chute_id"], ...
+  # result["decision"] "good"|"faulty"|"no_cap"|"unsure"
+  # result["chute_id"] 0=good, 1=reject (faulty or no_cap)
+
+v7 model is 3-class (faulty / good / no_cap).  The API is backward-compatible:
+chute_id remains binary (0=good, 1=reject) so electrical integration is unchanged.
 """
 
 from __future__ import annotations
@@ -63,29 +67,58 @@ def _match_channels(x: np.ndarray, model: tf.keras.Model) -> np.ndarray:
     raise ValueError(f"Unsupported model input channels: {ch}")
 
 
-def _infer_p_good(out: np.ndarray, class_names: List[str]) -> float:
-    out = np.asarray(out)
-    if out.ndim == 2 and out.shape[1] == 1:
-        p = float(out[0, 0])
-        if len(class_names) == 2 and class_names[1] == "good":
-            return p
-        if len(class_names) == 2 and class_names[1] == "faulty":
-            return 1.0 - p
-        return p
-    if out.ndim == 2 and out.shape[1] == 2:
-        probs = out[0]
-        if "good" in class_names:
-            return float(probs[class_names.index("good")])
-        return float(probs[1])
-    raise ValueError(f"Unexpected model output shape: {out.shape}")
+def _classify(
+    out: np.ndarray,
+    class_names: List[str],
+    th_accept: float,
+    th_reject: float,
+) -> Tuple[str, float]:
+    """Return (decision, p_good) for any number of output classes.
 
+    For 3-class (faulty/good/no_cap):
+      - decision = argmax class name when confidence >= th_accept, else "unsure"
+      - p_good   = softmax probability of the "good" class
 
-def _decision(p_good: float, th_accept: float, th_reject: float) -> str:
-    if p_good >= th_accept:
-        return "good"
-    if p_good <= th_reject:
-        return "faulty"
-    return "unsure"
+    For legacy 2-class / binary models:
+      - keeps threshold logic on p_good unchanged
+    """
+    probs = np.asarray(out)
+    if probs.ndim == 2:
+        probs = probs[0]
+
+    n = len(probs)
+
+    if "good" in class_names:
+        p_good = float(probs[class_names.index("good")])
+    else:
+        p_good = float(probs[-1])  # fallback
+
+    if n >= 3:
+        # Multi-class: use argmax as primary decision signal
+        idx = int(np.argmax(probs))
+        confidence = float(probs[idx])
+        if confidence >= th_accept:
+            decision = class_names[idx]
+        else:
+            decision = "unsure"
+    elif n == 2:
+        # Binary softmax
+        if p_good >= th_accept:
+            decision = "good"
+        elif p_good <= th_reject:
+            decision = "faulty"
+        else:
+            decision = "unsure"
+    else:
+        # Single-output sigmoid
+        if p_good >= th_accept:
+            decision = "good"
+        elif p_good <= th_reject:
+            decision = "faulty"
+        else:
+            decision = "unsure"
+
+    return decision, p_good
 
 
 class CapClassifier:
@@ -112,10 +145,17 @@ class CapClassifier:
         self.th_reject = th_reject
         self.roi = roi
 
-        self.model = tf.keras.models.load_model(str(self.model_path))
+        try:
+            self.model = tf.keras.models.load_model(str(self.model_path), compile=False)
+        except (NotImplementedError, ValueError):
+            self.model = tf.keras.models.load_model(
+                str(self.model_path), compile=False, safe_mode=False
+            )
         self.class_names = load_class_names(self.class_names_path)
-        if set(self.class_names) != {"faulty", "good"}:
-            raise ValueError(f"Stage A must have class_names ['faulty','good']. Got: {self.class_names}")
+        if not {"faulty", "good"}.issubset(set(self.class_names)):
+            raise ValueError(
+                f"class_names must include at least 'faulty' and 'good'. Got: {self.class_names}"
+            )
 
         shp = self.model.input_shape
         if isinstance(shp, list):
@@ -138,9 +178,9 @@ class CapClassifier:
 
         Returns:
             {
-                "decision": "good" | "faulty" | "unsure",
-                "p_good": float,
-                "chute_id": int,       # 0=good, 1+=reject/fault-type
+                "decision": "good" | "faulty" | "no_cap" | "unsure",
+                "p_good": float,       # softmax prob of the 'good' class
+                "chute_id": int,       # 0=good, 1=reject (faulty or no_cap)
                 "fault_type": str | None,
                 "fault_confidence": float | None,
             }
@@ -157,8 +197,7 @@ class CapClassifier:
         x = _preprocess(frame, self.image_size, self.roi)
         x = _match_channels(x, self.model)
         out = self.model.predict(x, verbose=0)
-        p_good = _infer_p_good(out, self.class_names)
-        decision = _decision(p_good, self.th_accept, self.th_reject)
+        decision, p_good = _classify(out, self.class_names, self.th_accept, self.th_reject)
 
         chute_id = 0 if decision == "good" else 1
         fault_type: Optional[str] = None
@@ -210,8 +249,8 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Classify one cap image (CLI for scripts).")
-    ap.add_argument("--model", default="models/cap_classifier_best.keras")
-    ap.add_argument("--class_names", default="models/class_names.json")
+    ap.add_argument("--model", default="models/v7/cap_classifier_best.keras")
+    ap.add_argument("--class_names", default="models/v7/class_names.json")
     ap.add_argument("--stageB_model", default=None)
     ap.add_argument("--stageB_classes", default=None)
     ap.add_argument("--th_accept", type=float, default=0.6)

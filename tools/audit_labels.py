@@ -15,25 +15,6 @@ import cv2
 import tensorflow as tf
 
 
-class FocalLoss(tf.keras.losses.Loss):
-    """Custom loss for loading model."""
-    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.alpha = alpha
-        self.gamma = gamma
-    
-    def call(self, y_true, y_pred):
-        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), tf.shape(y_pred)[-1])
-        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
-        epsilon = 1e-7
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        ce = -y_true_onehot * tf.math.log(y_pred)
-        ce = tf.reduce_sum(ce, axis=-1)
-        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
-        focal_weight = tf.pow(1.0 - p_t, self.gamma)
-        return tf.reduce_mean(self.alpha * focal_weight * ce)
-
-
 def preprocess_image(img_path: str, image_size: tuple = (224, 224)) -> np.ndarray:
     """Load and preprocess single image."""
     img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
@@ -77,10 +58,10 @@ def audit_dataset_batch(
     """Audit all images using batch predictions."""
     
     print("Loading model...")
-    model = tf.keras.models.load_model(
-        model_path, 
-        custom_objects={'FocalLoss': FocalLoss}
-    )
+    try:
+        model = tf.keras.models.load_model(model_path, compile=False)
+    except (NotImplementedError, ValueError):
+        model = tf.keras.models.load_model(model_path, safe_mode=False, compile=False)
     image_size = tuple(int(x) for x in model.input_shape[1:3])
     n_channels = model.input_shape[-1]
     print(f"Model input: {image_size}, channels: {n_channels}")

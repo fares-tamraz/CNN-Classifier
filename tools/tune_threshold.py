@@ -1,15 +1,16 @@
-"""Tune a probability threshold for the binary classifier.
+"""Tune a probability threshold for the cap classifier.
 
-It evaluates many thresholds on a chosen split (val by default) and prints a
-table including accuracy, precision/recall/F1 for BOTH classes.
+Sweeps thresholds on p(good) and prints accuracy / precision / recall / F1
+for both the 'good' and 'faulty' classes.  Works with 2-class and 3-class
+(faulty / good / no_cap) models — for the 3-class model, threshold is applied
+to the 'good' softmax probability; anything below the threshold is treated as
+a reject (faulty or no_cap).
 
 Usage:
-  python tools/tune_threshold.py --model models/cap_classifier_best.keras \
-    --data_dir data/processed/cls_binary_fullframe --split val
-
-Notes:
-- For the binary sigmoid model in this repo, the network outputs p_good.
-- Keras folder order is alphabetical, so class_names usually are ['faulty','good'].
+  python tools/tune_threshold.py \
+    --model models/v7/cap_classifier_best.keras \
+    --class_names models/v7/class_names.json \
+    --data_dir data/processed/cls_3class_crops --split val
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_loader import load_datasets
-from src.predict import load_class_names, infer_p_good  # reuse robust helpers
+from src.predict import load_class_names
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -72,13 +73,16 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="Path to .keras model")
-    ap.add_argument("--class_names", default="models/class_names.json")
+    ap.add_argument("--class_names", default="models/v7/class_names.json")
     ap.add_argument("--data_dir", required=True)
     ap.add_argument("--split", choices=["train", "val", "test"], default="val")
     ap.add_argument("--steps", type=int, default=19, help="Number of thresholds between 0.05 and 0.95")
     args = ap.parse_args()
 
-    model = tf.keras.models.load_model(args.model)
+    try:
+        model = tf.keras.models.load_model(args.model, compile=False)
+    except (NotImplementedError, ValueError):
+        model = tf.keras.models.load_model(args.model, compile=False, safe_mode=False)
     class_names = load_class_names(args.class_names)
 
     train_ds, val_ds, test_ds, ds_class_names = load_datasets(
@@ -106,22 +110,28 @@ def main() -> None:
         yhat = np.array(yhat)
 
         if yhat.ndim == 2 and yhat.shape[1] == 1:
-            # sigmoid p(positive_class)
+            # sigmoid — map to p_good
             p = yhat[:, 0]
-            # map to p_good
             if len(class_names) == 2 and class_names[1] != "good":
                 p = 1.0 - p
             p_good.append(p)
-        elif yhat.ndim == 2 and yhat.shape[1] == 2:
-            good_idx = class_names.index("good") if "good" in class_names else 1
+        elif yhat.ndim == 2 and yhat.shape[1] >= 2:
+            # softmax — binary or N-class: extract the 'good' column
+            good_idx = class_names.index("good") if "good" in class_names else yhat.shape[1] - 1
             p_good.append(yhat[:, good_idx])
         else:
             raise ValueError(f"Unexpected output shape: {yhat.shape}")
 
-    y_true = np.concatenate(y_true)
+    y_true_raw = np.concatenate(y_true)
     p_good = np.concatenate(p_good)
 
+    # Binarize: 1=good, 0=everything-else (faulty / no_cap)
+    good_idx = class_names.index("good") if "good" in class_names else 1
+    y_true = (y_true_raw == good_idx).astype(int)
+
     print(f"\nSplit: {args.split} | N={len(y_true)}")
+    print(f"Classes (from file): {class_names}")
+    print(f"Good index: {good_idx}  |  Good count: {y_true.sum()}  |  Reject count: {(y_true==0).sum()}")
 
     thresholds = np.linspace(0.05, 0.95, args.steps)
 

@@ -29,42 +29,6 @@ import numpy as np
 import tensorflow as tf
 
 
-class FocalLoss(tf.keras.losses.Loss):
-    """Focal loss for handling class imbalance.
-    
-    Focuses on hard examples by down-weighting easy ones.
-    Works with sparse (int) labels.
-    """
-    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
-        super().__init__(**kwargs)
-        self.alpha = alpha
-        self.gamma = gamma
-    
-    def call(self, y_true, y_pred):
-        """Compute focal loss."""
-        # Sparse to one-hot
-        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), 
-                                   tf.shape(y_pred)[-1])
-        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
-        
-        # Clip predictions
-        epsilon = 1e-7
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        
-        # Cross entropy
-        ce = -y_true_onehot * tf.math.log(y_pred)
-        ce = tf.reduce_sum(ce, axis=-1)
-        
-        # Focal weight: (1 - p_t)^gamma
-        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
-        focal_weight = tf.pow(1.0 - p_t, self.gamma)
-        
-        # Focal loss
-        focal_loss = self.alpha * focal_weight * ce
-        
-        return tf.reduce_mean(focal_loss)
-
-
 def load_class_names(path: str) -> list[str]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     # supports either ["faulty","good"] OR {"class_names":[...]}
@@ -75,31 +39,35 @@ def load_class_names(path: str) -> list[str]:
     raise ValueError(f"Unexpected format in {path}: {type(data)}")
 
 
-def _infer_p_good_from_output(y: np.ndarray, class_names: list[str]) -> float:
-    """Supports sigmoid (shape (1,1)), softmax (shape (1,2)), and multi-class (shape (1,N)).
-    
-    For multi-class, returns probability of 'good_cap' or 'good' if available.
-    Otherwise returns highest probability class.
+def _infer_from_output(
+    y: np.ndarray, class_names: list[str]
+) -> tuple[float, str, float]:
+    """Run inference on model output.
+
+    Returns (p_good, pred_class_name, pred_confidence).
+    Works with sigmoid (1,1), binary softmax (1,2), and 3-class softmax (1,N).
     """
     y = np.asarray(y)
     if y.ndim == 2 and y.shape[1] == 1:
         p_pos = float(y[0, 0])
-        # In binary training with class_names ['faulty','good'], index 1 is 'good'
         if len(class_names) == 2 and class_names[1] == "good":
-            return p_pos
-        if len(class_names) == 2 and class_names[1] == "faulty":
-            return 1.0 - p_pos
-        # fallback: assume p_pos is p_good
-        return p_pos
+            p_good = p_pos
+        elif len(class_names) == 2 and class_names[1] == "faulty":
+            p_good = 1.0 - p_pos
+        else:
+            p_good = p_pos
+        pred_name = "good" if p_good >= 0.5 else class_names[0]
+        return p_good, pred_name, p_good if p_good >= 0.5 else (1.0 - p_good)
 
     if y.ndim == 2 and y.shape[1] >= 2:
         probs = y[0]
-        # Look for 'good_cap' or 'good' class
-        for good_name in ['good_cap', 'good']:
+        pred_idx = int(np.argmax(probs))
+        pred_name = class_names[pred_idx]
+        pred_conf = float(probs[pred_idx])
+        for good_name in ["good_cap", "good"]:
             if good_name in class_names:
-                return float(probs[class_names.index(good_name)])
-        # Fallback: assume last class is good
-        return float(probs[-1])
+                return float(probs[class_names.index(good_name)]), pred_name, pred_conf
+        return float(probs[-1]), pred_name, pred_conf
 
     raise ValueError(f"Unexpected model output shape: {y.shape}")
 
@@ -224,8 +192,8 @@ class BeltController:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Real-time cap classifier with optional UNSURE recheck.")
-    parser.add_argument("--model", type=str, default="models/cap_classifier_best.keras")
-    parser.add_argument("--class_names", type=str, default="models/class_names.json")
+    parser.add_argument("--model", type=str, default="models/v7/cap_classifier_best.keras")
+    parser.add_argument("--class_names", type=str, default="models/v7/class_names.json")
     parser.add_argument("--stageB_model", type=str, default=None, help="Stage B fault-type model (optional)")
     parser.add_argument("--stageB_classes", type=str, default=None, help="Stage B class_names JSON (optional)")
 
@@ -256,7 +224,10 @@ def main() -> None:
     args = parser.parse_args()
     dry_run = not getattr(args, "no_dry_run", False)
 
-    model = tf.keras.models.load_model(args.model, custom_objects={'FocalLoss': FocalLoss})
+    try:
+        model = tf.keras.models.load_model(args.model, compile=False)
+    except (NotImplementedError, ValueError):
+        model = tf.keras.models.load_model(args.model, compile=False, safe_mode=False)
     class_names = load_class_names(args.class_names)
 
     print(f"Model loaded. Classes: {class_names}")
@@ -265,7 +236,10 @@ def main() -> None:
     model_b: Optional[tf.keras.Model] = None
     class_names_b: Optional[list[str]] = None
     if use_stageB:
-        model_b = tf.keras.models.load_model(args.stageB_model, custom_objects={'FocalLoss': FocalLoss})
+        try:
+            model_b = tf.keras.models.load_model(args.stageB_model, compile=False)
+        except (NotImplementedError, ValueError):
+            model_b = tf.keras.models.load_model(args.stageB_model, compile=False, safe_mode=False)
         class_names_b = load_class_names(args.stageB_classes)
         print(f"Two-stage mode: Stage B classes = {class_names_b}")
 
@@ -286,6 +260,7 @@ def main() -> None:
 
     last_text = "READY"
     last_p: Optional[float] = None
+    last_pred: Optional[str] = None
 
     while True:
         ok, frame = cap.read()
@@ -303,7 +278,7 @@ def main() -> None:
             x1 = int(w * rx1); x2 = int(w * rx2)
             y1 = int(h * ry1); y2 = int(h * ry2)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
-            
+
             # Show squeezed preview in top-right corner
             if args.squeeze != 1.0:
                 roi_crop = gray[y1:y2, x1:x2]
@@ -314,7 +289,11 @@ def main() -> None:
                 squeezed_bgr = cv2.cvtColor(squeezed, cv2.COLOR_GRAY2BGR)
                 overlay[-150:, -150:] = squeezed_bgr
 
-        msg = last_text if last_p is None else f"{last_text} | p_good={last_p:.3f}"
+        if last_p is None:
+            msg = last_text
+        else:
+            pred_info = f"[{last_pred}]" if last_pred else ""
+            msg = f"{last_text} {pred_info} p_good={last_p:.3f}"
         cv2.putText(overlay, msg, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
         cv2.putText(overlay, "SPACE=classify | Q=quit", (30, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
         cv2.imshow("Bottle Cap Sorter (recheck)", overlay)
@@ -327,7 +306,7 @@ def main() -> None:
         if key == 32:  # SPACE
             x1 = preprocess_frame(frame, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x1 = match_model_channels(x1, model)
-            p1 = _infer_p_good_from_output(model.predict(x1, verbose=0), class_names)
+            p1, pred1, conf1 = _infer_from_output(model.predict(x1, verbose=0), class_names)
 
             decision1, score1 = decide_with_recheck(
                 p_good_1=p1,
@@ -340,7 +319,8 @@ def main() -> None:
             if decision1 != "UNSURE" or args.no_recheck:
                 last_text = decision1
                 last_p = score1
-                print(f"[PASS1] p_good={p1:.3f} -> {decision1}")
+                last_pred = pred1
+                print(f"[PASS1] {pred1} (conf={conf1:.3f}, p_good={p1:.3f}) -> {decision1}")
                 x_last = x1
                 if decision1 == "ACCEPT":
                     belt.divert(0)
@@ -370,7 +350,7 @@ def main() -> None:
 
             x2 = preprocess_frame(frame2, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x2 = match_model_channels(x2, model)
-            p2 = _infer_p_good_from_output(model.predict(x2, verbose=0), class_names)
+            p2, pred2, conf2 = _infer_from_output(model.predict(x2, verbose=0), class_names)
 
             final_decision, final_score = decide_with_recheck(
                 p_good_1=p1,
@@ -382,7 +362,8 @@ def main() -> None:
 
             last_text = final_decision + " (RECHECK)"
             last_p = final_score
-            print(f"[PASS2] p_good2={p2:.3f} -> FINAL avg={final_score:.3f} -> {final_decision}")
+            last_pred = pred2
+            print(f"[PASS2] {pred2} (conf={conf2:.3f}, p_good={p2:.3f}) -> FINAL avg={final_score:.3f} -> {final_decision}")
 
             x_last = x2
             if final_decision == "ACCEPT":
