@@ -143,13 +143,13 @@ def decide_with_recheck(
 
 def run_stageB_and_chute(
     model_b: tf.keras.Model,
+    infer_fn_b,
     class_names_b: list[str],
     x: np.ndarray,
 ) -> Tuple[int, str, float]:
     """Run Stage B on preprocessed input. Returns (chute_id, label, confidence)."""
     x_b = match_model_channels(x, model_b)
-    out = model_b.predict(x_b, verbose=0)
-    probs = np.asarray(out)[0]
+    probs = np.asarray(infer_fn_b(x_b, training=False))[0]
     idx = int(np.argmax(probs))
     conf = float(probs[idx])
     label = class_names_b[idx]
@@ -228,18 +228,25 @@ def main() -> None:
         model = tf.keras.models.load_model(args.model, compile=False)
     except (NotImplementedError, ValueError):
         model = tf.keras.models.load_model(args.model, compile=False, safe_mode=False)
+
+    # Wrap in tf.function so the graph is traced once and reused every call.
+    # This drops single-frame latency from ~400 ms to ~40 ms on CPU.
+    _infer_fn = tf.function(model, reduce_retracing=True)
+
     class_names = load_class_names(args.class_names)
 
     print(f"Model loaded. Classes: {class_names}")
 
     use_stageB = bool(args.stageB_model and args.stageB_classes)
     model_b: Optional[tf.keras.Model] = None
+    _infer_fn_b = None
     class_names_b: Optional[list[str]] = None
     if use_stageB:
         try:
             model_b = tf.keras.models.load_model(args.stageB_model, compile=False)
         except (NotImplementedError, ValueError):
             model_b = tf.keras.models.load_model(args.stageB_model, compile=False, safe_mode=False)
+        _infer_fn_b = tf.function(model_b, reduce_retracing=True)
         class_names_b = load_class_names(args.stageB_classes)
         print(f"Two-stage mode: Stage B classes = {class_names_b}")
 
@@ -306,7 +313,7 @@ def main() -> None:
         if key == 32:  # SPACE
             x1 = preprocess_frame(frame, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x1 = match_model_channels(x1, model)
-            p1, pred1, conf1 = _infer_from_output(model.predict(x1, verbose=0), class_names)
+            p1, pred1, conf1 = _infer_from_output(_infer_fn(x1, training=False).numpy(), class_names)
 
             decision1, score1 = decide_with_recheck(
                 p_good_1=p1,
@@ -327,7 +334,7 @@ def main() -> None:
                     belt.forward()
                 else:
                     if use_stageB and model_b is not None and class_names_b is not None:
-                        chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, class_names_b, x_last)
+                        chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, _infer_fn_b, class_names_b, x_last)
                         print(f"  StageB: {fault_label} (conf={fault_conf:.3f}) -> chute {chute_id}")
                         belt.divert(chute_id)
                     else:
@@ -350,7 +357,7 @@ def main() -> None:
 
             x2 = preprocess_frame(frame2, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x2 = match_model_channels(x2, model)
-            p2, pred2, conf2 = _infer_from_output(model.predict(x2, verbose=0), class_names)
+            p2, pred2, conf2 = _infer_from_output(_infer_fn(x2, training=False).numpy(), class_names)
 
             final_decision, final_score = decide_with_recheck(
                 p_good_1=p1,
@@ -371,7 +378,7 @@ def main() -> None:
                 belt.forward()
             else:
                 if use_stageB and model_b is not None and class_names_b is not None:
-                    chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, class_names_b, x_last)
+                    chute_id, fault_label, fault_conf = run_stageB_and_chute(model_b, _infer_fn_b, class_names_b, x_last)
                     print(f"  StageB: {fault_label} (conf={fault_conf:.3f}) -> chute {chute_id}")
                     belt.divert(chute_id)
                 else:
