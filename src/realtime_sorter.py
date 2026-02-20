@@ -201,9 +201,9 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
 
-    parser.add_argument("--th_accept", type=float, default=0.60, help="ACCEPT if p_good >= this")
-    parser.add_argument("--th_reject", type=float, default=0.40, help="REJECT if p_good <= this")
-    parser.add_argument("--th_final", type=float, default=0.60, help="After recheck, accept if avg >= this")
+    parser.add_argument("--th_accept", type=float, default=0.45, help="ACCEPT if p_good >= this")
+    parser.add_argument("--th_reject", type=float, default=0.35, help="REJECT if p_good <= this")
+    parser.add_argument("--th_final", type=float, default=0.45, help="After recheck, accept if avg >= this")
 
     parser.add_argument("--reverse_seconds", type=float, default=0.80)
     parser.add_argument("--no_recheck", action="store_true", help="Disable the second-sample recheck")

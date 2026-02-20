@@ -94,11 +94,15 @@ def _classify(
         p_good = float(probs[-1])  # fallback
 
     if n >= 3:
-        # Multi-class: use argmax as primary decision signal
-        idx = int(np.argmax(probs))
-        confidence = float(probs[idx])
-        if confidence >= th_accept:
-            decision = class_names[idx]
+        # Threshold on p_good (consistent with tune_threshold.py tuning).
+        # Reject type (faulty vs no_cap) is determined by argmax over non-good classes.
+        if p_good >= th_accept:
+            decision = "good"
+        elif p_good <= th_reject:
+            # Confident reject — identify which class via argmax
+            non_good = [(i, float(probs[i])) for i in range(n) if class_names[i] != "good"]
+            best_reject_idx = max(non_good, key=lambda t: t[1])[0]
+            decision = class_names[best_reject_idx]
         else:
             decision = "unsure"
     elif n == 2:
@@ -135,8 +139,8 @@ class CapClassifier:
         *,
         stageB_model_path: Optional[Union[str, Path]] = None,
         stageB_classes_path: Optional[Union[str, Path]] = None,
-        th_accept: float = 0.6,
-        th_reject: float = 0.4,
+        th_accept: float = 0.45,
+        th_reject: float = 0.35,
         roi: Tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0),
     ):
         self.model_path = Path(model_path)
