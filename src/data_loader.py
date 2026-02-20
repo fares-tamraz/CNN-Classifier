@@ -117,9 +117,10 @@ def load_datasets(
     val_ds = val_ds.map(lambda x, y: (rescale(x), y), num_parallel_calls=tf.data.AUTOTUNE)
     test_ds = test_ds.map(lambda x, y: (rescale(x), y), num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Performance
-    train_ds = train_ds.cache().prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.cache().prefetch(tf.data.AUTOTUNE)
-    test_ds = test_ds.cache().prefetch(tf.data.AUTOTUNE)
+    # Performance: use conservative prefetch to avoid OOM on CPU
+    # Prefetch only 2 batches instead of AUTOTUNE which can exceed RAM budget
+    train_ds = train_ds.prefetch(2)
+    val_ds = val_ds.prefetch(2)
+    test_ds = test_ds.prefetch(2)
 
     return train_ds, val_ds, test_ds, class_names

@@ -29,6 +29,42 @@ import numpy as np
 import tensorflow as tf
 
 
+class FocalLoss(tf.keras.losses.Loss):
+    """Focal loss for handling class imbalance.
+    
+    Focuses on hard examples by down-weighting easy ones.
+    Works with sparse (int) labels.
+    """
+    def __init__(self, alpha=1.0, gamma=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def call(self, y_true, y_pred):
+        """Compute focal loss."""
+        # Sparse to one-hot
+        y_true_onehot = tf.one_hot(tf.cast(y_true, tf.int32), 
+                                   tf.shape(y_pred)[-1])
+        y_true_onehot = tf.cast(y_true_onehot, y_pred.dtype)
+        
+        # Clip predictions
+        epsilon = 1e-7
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+        
+        # Cross entropy
+        ce = -y_true_onehot * tf.math.log(y_pred)
+        ce = tf.reduce_sum(ce, axis=-1)
+        
+        # Focal weight: (1 - p_t)^gamma
+        p_t = tf.reduce_sum(y_true_onehot * y_pred, axis=-1)
+        focal_weight = tf.pow(1.0 - p_t, self.gamma)
+        
+        # Focal loss
+        focal_loss = self.alpha * focal_weight * ce
+        
+        return tf.reduce_mean(focal_loss)
+
+
 def load_class_names(path: str) -> list[str]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     # supports either ["faulty","good"] OR {"class_names":[...]}
@@ -40,7 +76,11 @@ def load_class_names(path: str) -> list[str]:
 
 
 def _infer_p_good_from_output(y: np.ndarray, class_names: list[str]) -> float:
-    """Supports sigmoid (shape (1,1)) and softmax (shape (1,2))."""
+    """Supports sigmoid (shape (1,1)), softmax (shape (1,2)), and multi-class (shape (1,N)).
+    
+    For multi-class, returns probability of 'good_cap' or 'good' if available.
+    Otherwise returns highest probability class.
+    """
     y = np.asarray(y)
     if y.ndim == 2 and y.shape[1] == 1:
         p_pos = float(y[0, 0])
@@ -52,19 +92,22 @@ def _infer_p_good_from_output(y: np.ndarray, class_names: list[str]) -> float:
         # fallback: assume p_pos is p_good
         return p_pos
 
-    if y.ndim == 2 and y.shape[1] == 2:
+    if y.ndim == 2 and y.shape[1] >= 2:
         probs = y[0]
-        if "good" in class_names:
-            return float(probs[class_names.index("good")])
-        # fallback: assume index 1 is good
-        return float(probs[1])
+        # Look for 'good_cap' or 'good' class
+        for good_name in ['good_cap', 'good']:
+            if good_name in class_names:
+                return float(probs[class_names.index(good_name)])
+        # Fallback: assume last class is good
+        return float(probs[-1])
 
     raise ValueError(f"Unexpected model output shape: {y.shape}")
 
 
-def preprocess_frame(frame_bgr: np.ndarray, image_size: Tuple[int, int], roi: Tuple[float, float, float, float]) -> np.ndarray:
+def preprocess_frame(frame_bgr: np.ndarray, image_size: Tuple[int, int], roi: Tuple[float, float, float, float], squeeze: float = 0.85) -> np.ndarray:
     """Crop ROI, convert to grayscale, resize, normalize.
-
+    
+    squeeze: horizontal compression factor (0.85 = compress to 85% of width)
     Returns float32 array shape (1,H,W,C) where C matches model input channels.
     """
     h, w = frame_bgr.shape[:2]
@@ -83,6 +126,12 @@ def preprocess_frame(frame_bgr: np.ndarray, image_size: Tuple[int, int], roi: Tu
 
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    
+    # Apply horizontal squeeze/compression
+    h_crop, w_crop = gray.shape
+    squeezed_w = int(w_crop * squeeze)
+    gray = cv2.resize(gray, (squeezed_w, h_crop), interpolation=cv2.INTER_AREA)
+    # Resize back to target size (creates the compression effect)
     gray = cv2.resize(gray, image_size, interpolation=cv2.INTER_AREA)
 
     x = gray.astype(np.float32) / 255.0
@@ -198,25 +247,25 @@ def main() -> None:
     )
 
     # ROI as fractions of frame width/height
-    parser.add_argument("--roi", type=float, nargs=4, default=[0.30, 0.70, 0.15, 0.55],
+    parser.add_argument("--roi", type=float, nargs=4, default=[0.25, 0.75, 0.20, 0.80],
                         metavar=("X1","X2","Y1","Y2"),
                         help="ROI crop as fractions: x1 x2 y1 y2")
-    parser.add_argument("--show_roi", action="store_true", help="Draw ROI box on preview")
+    parser.add_argument("--show_roi", action="store_true", default=True, help="Draw ROI box on preview")
+    parser.add_argument("--squeeze", type=float, default=0.85, help="Horizontal compression (0.85 = compress to 85% width)")
 
     args = parser.parse_args()
     dry_run = not getattr(args, "no_dry_run", False)
 
-    model = tf.keras.models.load_model(args.model)
+    model = tf.keras.models.load_model(args.model, custom_objects={'FocalLoss': FocalLoss})
     class_names = load_class_names(args.class_names)
 
-    if "good" not in class_names or "faulty" not in class_names:
-        raise SystemExit(f"class_names must include 'good' and 'faulty'. Got: {class_names}")
+    print(f"Model loaded. Classes: {class_names}")
 
     use_stageB = bool(args.stageB_model and args.stageB_classes)
     model_b: Optional[tf.keras.Model] = None
     class_names_b: Optional[list[str]] = None
     if use_stageB:
-        model_b = tf.keras.models.load_model(args.stageB_model)
+        model_b = tf.keras.models.load_model(args.stageB_model, custom_objects={'FocalLoss': FocalLoss})
         class_names_b = load_class_names(args.stageB_classes)
         print(f"Two-stage mode: Stage B classes = {class_names_b}")
 
@@ -243,7 +292,10 @@ def main() -> None:
         if not ok:
             break
 
-        overlay = frame.copy()
+        # Convert to grayscale to match training data
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Convert back to 3-channel for text overlay
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
         if args.show_roi:
             h, w = frame.shape[:2]
@@ -251,6 +303,16 @@ def main() -> None:
             x1 = int(w * rx1); x2 = int(w * rx2)
             y1 = int(h * ry1); y2 = int(h * ry2)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            
+            # Show squeezed preview in top-right corner
+            if args.squeeze != 1.0:
+                roi_crop = gray[y1:y2, x1:x2]
+                h_crop, w_crop = roi_crop.shape
+                squeezed_w = int(w_crop * args.squeeze)
+                squeezed = cv2.resize(roi_crop, (squeezed_w, h_crop), interpolation=cv2.INTER_AREA)
+                squeezed = cv2.resize(squeezed, (150, 150), interpolation=cv2.INTER_AREA)
+                squeezed_bgr = cv2.cvtColor(squeezed, cv2.COLOR_GRAY2BGR)
+                overlay[-150:, -150:] = squeezed_bgr
 
         msg = last_text if last_p is None else f"{last_text} | p_good={last_p:.3f}"
         cv2.putText(overlay, msg, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
@@ -263,7 +325,7 @@ def main() -> None:
             break
 
         if key == 32:  # SPACE
-            x1 = preprocess_frame(frame, image_size=image_size, roi=tuple(args.roi))
+            x1 = preprocess_frame(frame, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x1 = match_model_channels(x1, model)
             p1 = _infer_p_good_from_output(model.predict(x1, verbose=0), class_names)
 
@@ -306,7 +368,7 @@ def main() -> None:
                 belt.forward()
                 continue
 
-            x2 = preprocess_frame(frame2, image_size=image_size, roi=tuple(args.roi))
+            x2 = preprocess_frame(frame2, image_size=image_size, roi=tuple(args.roi), squeeze=args.squeeze)
             x2 = match_model_channels(x2, model)
             p2 = _infer_p_good_from_output(model.predict(x2, verbose=0), class_names)
 

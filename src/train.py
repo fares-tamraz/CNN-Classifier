@@ -84,6 +84,9 @@ def main() -> None:
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
+    
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss gamma parameter (focusing strength)")
+    parser.add_argument("--focal_alpha", type=float, default=1.0, help="Focal loss alpha parameter (class balance)")
 
     parser.add_argument("--fine_tune", action="store_true", help="Unfreeze backbone for a short fine-tune stage")
     parser.add_argument("--fine_tune_epochs", type=int, default=5)
@@ -126,7 +129,7 @@ def main() -> None:
         ]
     else:
         # Use focal loss for multiclass (handles imbalance better, focuses on hard examples)
-        loss = FocalLoss(alpha=1.0, gamma=2.0)
+        loss = FocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma)
         metrics = [tf.keras.metrics.SparseCategoricalAccuracy(name="acc")]
 
     model.compile(optimizer=tf.keras.optimizers.Adam(args.lr), loss=loss, metrics=metrics)

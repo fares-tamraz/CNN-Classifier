@@ -1,19 +1,96 @@
-# Python
+# =============================================================================
+# PYTHON
+# =============================================================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
+venv/
+env/
 .env
+.env.*
+pip-log.txt
 
-# Data (keep raw/processed out of git)
+# =============================================================================
+# DATA — never commit raw images or annotations to git
+# Large dataset folders must be downloaded/prepared locally via prepare_dataset.py
+# =============================================================================
 data/
 
-# Trained models and logs
+# =============================================================================
+# TRAINED MODELS & CHECKPOINTS
+# Models are large (15 MB+) and reproducible — share via cloud storage instead
+# =============================================================================
 models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.weights
+*.h5
+best.pt
+last.pt
+
+# =============================================================================
+# TRAINING LOGS & OUTPUTS
+# =============================================================================
 logs/
+runs/
+exp/
+wandb/
+*.log
+models/v*/logs/
 
-# Editors / OS
-.vscode/
-.DS_Store
-
-# Archives
+# =============================================================================
+# ARCHIVES & EXPORTS
+# =============================================================================
 *.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# =============================================================================
+# INTERNAL DEVELOPMENT DOCS (do not expose to public repo)
+# These are project diary / analysis files — useful locally, not for GitHub
+# =============================================================================
+DIAGNOSIS.md
+FIXES_APPLIED.md
+SUMMARY.md
+PROJECT_JOURNEY.txt
+
+# =============================================================================
+# MILESTONE REPORTS (LOCAL ONLY — never push to remote)
+# =============================================================================
+.milestones/*
+!.milestones/.gitkeep
+MILESTONE_REPORT.md
+model_card_internal.md
+internal_docs/
+
+# =============================================================================
+# EDITORS / OS ARTIFACTS
+# =============================================================================
+.vscode/
+.idea/
+.cursor/
+.claude/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+
+# =============================================================================
+# EVAL OUTPUTS (charts, previews — generated locally)
+# =============================================================================
+eval_outputs/
+
+# =============================================================================
+# SECRETS
+# =============================================================================
+secrets.*
+roboflow_key.*
+.roboflow/

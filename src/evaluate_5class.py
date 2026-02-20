@@ -1,4 +1,11 @@
-"""Evaluate 5-class model."""
+"""Evaluate multi-class (5-class or 3-class) model.
+
+Usage:
+  python src/evaluate_5class.py \
+    --model models/v4/cap_classifier_best.keras \
+    --class_names models/v4/class_names.json \
+    --data_dir data/processed/cls_5class_crops_v3
+"""
 
 from __future__ import annotations
 
@@ -11,7 +18,6 @@ import tensorflow as tf
 from sklearn.metrics import classification_report, confusion_matrix
 
 from data_loader import load_datasets
-from model import build_model
 
 
 def load_class_names(path: str) -> list[str]:
@@ -24,34 +30,23 @@ def load_class_names(path: str) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate 5-class model")
+    parser = argparse.ArgumentParser(description="Evaluate multi-class model")
     parser.add_argument("--model", "--model_path", dest="model_path", required=True)
-    parser.add_argument("--class_names", type=str, required=True)
+    parser.add_argument("--class_names", type=str, default=None, help="Optional: path to class_names.json (unused, class order inferred from dataset)")
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--image_size", type=int, nargs=2, default=[224, 224])
     parser.add_argument("--color_mode", type=str, choices=["grayscale", "rgb"], default="grayscale")
-    parser.add_argument("--model_type", type=str, choices=["simple", "mobilenetv2"], default="simple")
     args = parser.parse_args()
 
     image_size = (int(args.image_size[0]), int(args.image_size[1]))
 
-    class_names = load_class_names(args.class_names)
-    num_classes = len(class_names)
-    
-    input_channels = 1 if args.color_mode == "grayscale" else 3
-    input_shape = (image_size[0], image_size[1], input_channels)
-    
-    # Build and load model
-    model = build_model(
-        input_shape=input_shape,
-        num_classes=num_classes,
-        model_type=args.model_type,
-        dropout=0.3
-    )
-    
-    model.compile(loss='categorical_crossentropy', metrics=['accuracy'])
-    model.load_weights(args.model_path)
+    # Load full saved model — handles custom layers (Lambda, FocalLoss) gracefully
+    try:
+        model = tf.keras.models.load_model(args.model_path, compile=False)
+    except (NotImplementedError, ValueError) as e:
+        print(f"Note: Standard load failed ({type(e).__name__}), attempting workaround...")
+        model = tf.keras.models.load_model(args.model_path, safe_mode=False, compile=False)
 
     _, _, test_ds, ds_class_names = load_datasets(
         args.data_dir,
@@ -65,6 +60,7 @@ def main() -> None:
     )
 
     class_names = list(ds_class_names)
+    num_classes = len(class_names)
 
     # Get predictions
     y_true = []
