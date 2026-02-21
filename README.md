@@ -178,7 +178,4 @@ CLI (e.g. for scripts): `python -m src.cap_classifier --model ... --class_names 
 - GOOD = only **Good Cap**
 - FAULTY = Broken Cap / Broken Ring / Loose Cap / No Cap (and missing/empty labels are treated as FAULTY for safety)
 
-## License / Attribution
-
-If your dataset is from Roboflow, cite the dataset author and Roboflow in your report.
 
